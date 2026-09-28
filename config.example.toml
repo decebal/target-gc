@@ -1,0 +1,38 @@
+# ~/.config/target-gc/config.toml — settings for target-gc. These are the
+# defaults; a missing file means exactly this.
+#
+# Numbers are quoted strings: the reader supports strings and lists only.
+# Levels take binary units (50G, 512M) or a share of the volume (10%).
+
+[target-gc]
+# Where to look for Cargo build directories. Dot-directories are scanned
+# (agent worktrees and tool checkouts often live in them).
+roots = ["~"]
+
+# Never descended into.
+skip = ["~/Library", "~/Pictures", "~/Music", "~/Movies"]
+
+# Below keep_free, evict the least recently built directories until free
+# space reaches target_free.
+keep_free   = "10%"
+target_free = "20%"
+
+# Nothing built more recently than this is ever evicted. Minimum 1.
+min_idle_days = "2"
+
+# Evict past this whatever the free space. "0" means only under pressure.
+max_idle_days = "30"
+
+# Paths never touched.
+protect = []
+
+# Files that may name a binary inside a build directory, in addition to every
+# launchd plist and systemd unit. A directory named in any of them is kept.
+scan_files = [
+  "~/.claude.json",
+  "~/.claude/settings.json",
+  "~/.codex/config.toml",
+  "~/.zshrc",
+  "~/.bashrc",
+  "~/.profile",
+]
