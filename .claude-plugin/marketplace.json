@@ -1,0 +1,16 @@
+{
+  "name": "target-gc",
+  "description": "The target-gc plugin: free disk space held by Cargo build directories safely.",
+  "owner": {
+    "name": "Decebal Dobrica",
+    "url": "https://github.com/decebal"
+  },
+  "plugins": [
+    {
+      "name": "target-gc",
+      "source": "./",
+      "description": "Free disk space held by Cargo build directories without breaking a build, a dev server or a service.",
+      "version": "0.1.0"
+    }
+  ]
+}

@@ -1,0 +1,54 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS takes the lsof process snapshot; Linux reads /proc. Both paths
+        # decide what may be deleted, so both run.
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+      # The real binary against a tree holding one Cargo-tagged build directory
+      # and one directory merely NAMED target: the first must go, the second
+      # must survive.
+      - name: Smoke test the binary
+        shell: bash
+        run: |
+          cargo build --release
+          bin="$PWD/target/release/target-gc"
+          fx=$(mktemp -d)
+          mkdir -p "$fx/crate/target/debug/deps" "$fx/js/lib/target"
+          printf 'Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag created by cargo.\n' \
+            > "$fx/crate/target/CACHEDIR.TAG"
+          : > "$fx/crate/target/debug/.cargo-lock"
+          printf 'x\n' > "$fx/js/lib/target/es5.js"
+          old=$(date -u -d '40 days ago' +%Y%m%d%H%M 2>/dev/null || date -u -v-40d +%Y%m%d%H%M)
+          find "$fx" -exec touch -t "$old" {} +
+          printf '[target-gc]\nroots = ["%s"]\n' "$fx" > "$fx/gc.toml"
+          XDG_STATE_HOME="$fx/state" "$bin" run --config "$fx/gc.toml"
+          [ ! -e "$fx/crate/target" ] || { echo "tagged build dir survived"; exit 1; }
+          [ -e "$fx/js/lib/target/es5.js" ] || { echo "a directory merely named target was deleted"; exit 1; }
+          [ -s "$fx/state/target-gc/last-run.json" ] || { echo "no run record"; exit 1; }
+          echo "smoke OK"
+
+      - name: Package includes the skill
+        shell: bash
+        run: |
+          cargo package --list --allow-dirty > files.txt
+          grep -qx 'skills/target-gc/SKILL.md' files.txt || { echo "skill missing from the crate"; cat files.txt; exit 1; }

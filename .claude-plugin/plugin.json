@@ -1,0 +1,13 @@
+{
+  "name": "target-gc",
+  "version": "0.1.0",
+  "description": "Free disk space held by Cargo build directories without breaking a build, a dev server or a service. A skill for the target-gc binary, plus a session-start line when the disk is low or the hourly cleanup stopped.",
+  "author": {
+    "name": "Decebal Dobrica",
+    "url": "https://github.com/decebal"
+  },
+  "homepage": "https://github.com/decebal/target-gc",
+  "repository": "https://github.com/decebal/target-gc",
+  "license": "MIT",
+  "keywords": ["rust", "cargo", "disk-space", "cleanup"]
+}

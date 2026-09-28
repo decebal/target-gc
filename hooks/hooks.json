@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "b=\"$(command -v target-gc || echo \"$HOME/.cargo/bin/target-gc\")\"; if [ -x \"$b\" ]; then \"$b\" hook; else echo 'target-gc plugin: the target-gc binary is not installed. Install it with: cargo install target-gc'; fi",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
