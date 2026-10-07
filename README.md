@@ -1,15 +1,46 @@
+<div align="center">
+
 # target-gc
 
-Evict idle Cargo build directories when the disk needs the space, and never one
-that a build, a running program or a service is using. Ships a Claude Code
-skill and plugin, so an agent frees space the same safe way instead of running
-`rm -rf target/`.
+**Garbage collection for Cargo `target/` directories.**<br>
+Frees disk space when it runs low, and never touches a build directory that a build, a running program or a service is using.
+
+[![crates.io](https://img.shields.io/crates/v/target-gc?logo=rust&logoColor=white&color=e43716)](https://crates.io/crates/target-gc)
+[![downloads](https://img.shields.io/crates/d/target-gc?logo=rust&logoColor=white&color=dea584)](https://crates.io/crates/target-gc)
+[![docs.rs](https://img.shields.io/docsrs/target-gc?logo=docsdotrs&label=docs.rs)](https://docs.rs/target-gc)
+[![CI](https://img.shields.io/github/actions/workflow/status/decebal/target-gc/ci.yml?branch=main&logo=githubactions&logoColor=white&label=CI)](https://github.com/decebal/target-gc/actions/workflows/ci.yml)
+[![license](https://img.shields.io/crates/l/target-gc?color=blue)](LICENSE)
+[![MSRV](https://img.shields.io/crates/msrv/target-gc?logo=rust&label=MSRV)](Cargo.toml)
+
+[![macOS](https://img.shields.io/badge/macOS-launchd-000000?logo=apple&logoColor=white)](#install)
+[![Linux](https://img.shields.io/badge/Linux-systemd-FCC624?logo=linux&logoColor=black)](#install)
+[![Claude Code](https://img.shields.io/badge/Claude_Code-plugin_%2B_skill-D97757?logo=claude&logoColor=white)](#install)
+[![binstall](https://img.shields.io/badge/cargo--binstall-supported-2ea44f?logo=rust&logoColor=white)](https://github.com/cargo-bins/cargo-binstall)
+
+[![Built with Rust, for macOS and Linux, tested on GitHub Actions](https://skillicons.dev/icons?i=rust,apple,linux,githubactions)](https://skillicons.dev)
+
+[crates.io](https://crates.io/crates/target-gc) · [docs.rs](https://docs.rs/target-gc) · [Install](#install) · [What it does](#what-it-does) · [Why not an existing tool](#why-not-an-existing-tool) · [Limits](#limits)
+
+</div>
+
+---
 
 A machine that builds Rust for several projects and agent worktrees fills its
 disk with `target/` directories nobody is using. Measured on one laptop: 38 of
 them, 152 GB by `du`, 9.3 GiB free. Clearing them by hand is where the damage
 happens: a dev server writing into `target/`, a launchd service running its
 binary out of `target/release`.
+
+target-gc checks each of those before it deletes anything. It also ships a
+Claude Code skill and plugin, so an agent frees space the same safe way instead
+of running `rm -rf target/`.
+
+| | |
+|---|---|
+| **Finds build dirs by** | Cargo's own `CACHEDIR.TAG`, never by the name `target` |
+| **Keeps a build dir when** | a build holds its lock, a program runs from it, a dev server or watcher works in its project, or a service file names its binary |
+| **Deletes** | after a rename aside, holding every Cargo lock, so a build that starts meanwhile builds cold instead of into a half-deleted directory |
+| **Reports** | free space measured with `df` before and after every eviction, in `last-run.json` |
 
 ## Install
 
