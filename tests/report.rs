@@ -69,6 +69,15 @@ fn settings_default_and_override() {
     assert_eq!(s.max_idle, None, "\"0\" must disable expiry");
 }
 
+/// A configured writer adds to the defaults; listing one must not drop `dx`.
+#[test]
+fn writers_extend_the_defaults() {
+    let s = settings("[target-gc]\nwriters = [\"my-watcher\", \"dx\"]\n").expect("writers");
+    assert!(s.writers.iter().any(|w| w == "my-watcher"));
+    assert_eq!(s.writers.iter().filter(|w| *w == "dx").count(), 1);
+    assert!(s.writers.iter().any(|w| w == "bacon"));
+}
+
 /// A build seconds old may sit between two Cargo invocations with no lock
 /// held; a floor of zero would put it in scope.
 #[test]

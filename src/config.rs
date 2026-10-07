@@ -9,6 +9,7 @@
 //! max_idle_days = "30"     # evict past this whatever the free space; "0" = never
 //! protect       = []       # paths never touched
 //! scan_files    = [...]    # files that may name a binary inside a build dir
+//! writers       = []       # extra process names that write into target/
 //! ```
 //!
 //! Numbers are quoted: the reader supports strings and lists only, on purpose
@@ -18,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::disk::Level;
+use crate::liveness::DEFAULT_WRITERS;
 use crate::toml_subset::Config;
 use crate::DAY;
 
@@ -33,6 +35,8 @@ pub struct Settings {
     pub max_idle: Option<Duration>,
     pub protect: Vec<PathBuf>,
     pub scan_files: Vec<PathBuf>,
+    /// Process names whose cwd in a project holds its build directory.
+    pub writers: Vec<String>,
     pub max_depth: usize,
     pub deadline: Duration,
 }
@@ -93,6 +97,7 @@ impl Settings {
                 "~/.profile",
                 "~/.config/fish/config.fish",
             ]),
+            writers: DEFAULT_WRITERS.iter().map(|w| (*w).to_string()).collect(),
             max_depth: 10,
             deadline: Duration::from_secs(240),
         }
@@ -124,6 +129,13 @@ impl Settings {
         }
         if let Some(v) = config.list(&key("scan_files")) {
             s.scan_files = paths(v);
+        }
+        if let Some(v) = config.list(&key("writers")) {
+            for w in v {
+                if !s.writers.contains(&w) {
+                    s.writers.push(w);
+                }
+            }
         }
         if let Some(v) = config.string(&key("keep_free")) {
             s.keep_free = Level::parse(v).ok_or(format!("keep_free: cannot read {v:?}"))?;

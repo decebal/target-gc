@@ -145,7 +145,7 @@ fn survey(settings: &Settings, home: &Path, deadline: Instant) -> Result<Survey,
         .into_iter()
         .map(|target| {
             let hold = protect::protection(&target, home, &settings.protect, &sources)
-                .or_else(|| liveness::hold(&target, &evidence));
+                .or_else(|| liveness::hold(&target, &evidence, &settings.writers));
             Candidate { target, hold }
         })
         .collect();
@@ -283,7 +283,7 @@ fn run(settings: &Settings, home: &Path, args: &Args) -> i32 {
         }
         let allocated = discover::allocated_bytes(&target.path);
         let before = *available;
-        let result = evict::evict(target, &evidence);
+        let result = evict::evict(target, &evidence, &settings.writers);
         let after = disk::space(home).map_or(before, |sp| sp.available);
         *available = after;
         let idle = human_age(target.idle(now));

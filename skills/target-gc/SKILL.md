@@ -25,7 +25,8 @@ If `target-gc` is not installed: `cargo install target-gc` (or
 
    Every line is a Cargo build directory (identified by the `CACHEDIR.TAG`
    Cargo writes, never by name) with either its idle time or the reason it is
-   held: `build running (lock held: …)`, `in use by pid N (cmd)`,
+   held: `build running (lock held: …)`, `in use by pid N (cmd)` (a build writer such as `dx` or `bacon` working in the
+   project, or a process running a binary from the build directory),
    `binary referenced by <file>`, or `under protected path …`.
    Sizes are allocated bytes: an upper bound, because copy-on-write clones
    share blocks.
