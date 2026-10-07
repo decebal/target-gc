@@ -3,7 +3,8 @@
 //! The order is the safety property:
 //!
 //! 1. re-verify, from disk, everything the plan assumed — still a Cargo build
-//!    directory, not a symlink, not built since the scan, no process in it;
+//!    directory, not a symlink, not built since the scan, no build writer in
+//!    the project and no process running from it;
 //! 2. take every Cargo profile lock and HOLD them, so no build can start;
 //! 3. rename the directory aside, under a name Cargo will never look for;
 //! 4. release the locks, then delete the renamed copy.
@@ -37,7 +38,7 @@ impl Refusal {
     }
 }
 
-pub fn evict(target: &Target, evidence: &[Evidence]) -> Result<(), Refusal> {
+pub fn evict(target: &Target, evidence: &[Evidence], writers: &[String]) -> Result<(), Refusal> {
     let path = &target.path;
     let meta = fs::symlink_metadata(path)
         .map_err(|e| Refusal::Skipped(format!("no longer readable: {e}")))?;
@@ -52,7 +53,7 @@ pub fn evict(target: &Target, evidence: &[Evidence]) -> Result<(), Refusal> {
     if last_activity(path) > target.last_activity {
         return Err(Refusal::Skipped("built since the scan".into()));
     }
-    if let Some(e) = owner(target, evidence) {
+    if let Some(e) = owner(target, evidence, writers) {
         return Err(Refusal::Skipped(format!(
             "in use by pid {} ({})",
             e.pid, e.command

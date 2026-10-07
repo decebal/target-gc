@@ -9,9 +9,10 @@
 //!    touched. See [`discover`].
 //! 2. **A build directory in use is never evicted.** Cargo holds a lock per
 //!    profile (`<target>/[<triple>/]<profile>/.cargo-lock`, and on newer Cargo
-//!    `.cargo-build-lock` / `.cargo-artifact-lock`). A process whose working
-//!    directory is inside the project, or whose executable lives in the build
-//!    directory, also counts. Missing evidence fails closed. See [`liveness`].
+//!    `.cargo-build-lock` / `.cargo-artifact-lock`). A process whose executable
+//!    lives in the build directory also counts, and so does a known build
+//!    writer (`dx`, `bacon`, `cargo`, …) whose working directory is inside the
+//!    project. Missing evidence fails closed. See [`liveness`].
 //! 3. **What was freed is measured, not estimated.** Directories seeded as
 //!    copy-on-write clones share blocks, so their apparent size overstates what
 //!    deleting them returns — one reported 50 G and freed 2 GiB. The eviction
@@ -62,8 +63,8 @@ impl Target {
 pub enum Hold {
     /// A Cargo lock is held: a build is running right now.
     Locked(PathBuf),
-    /// A running process has its cwd in the project or its executable in the
-    /// build directory.
+    /// A running build writer has its cwd in the project, or a process has its
+    /// executable in the build directory.
     InUse { pid: u32, command: String },
     /// A service definition or config file points at a binary inside it.
     Referenced(PathBuf),

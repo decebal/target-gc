@@ -44,7 +44,7 @@ Without the plugin, `target-gc skill install` writes the same skill to
 | | |
 |---|---|
 | **Finds** | Every directory holding the `CACHEDIR.TAG` Cargo writes, under the configured roots. A directory merely *named* `target` is somebody's source, and is never touched |
-| **Holds** | A directory whose Cargo profile lock is held (`<target>/[<triple>/]<profile>/.cargo-lock`, `.cargo-build-lock`, `.cargo-artifact-lock`), whose project is a process's cwd, whose files include a running executable, or whose path a launchd plist, systemd unit or listed config file names |
+| **Holds** | A directory whose Cargo profile lock is held (`<target>/[<triple>/]<profile>/.cargo-lock`, `.cargo-build-lock`, `.cargo-artifact-lock`), whose project is the cwd of a known build writer (`cargo`, `cargo-watch`, `cargo-leptos`, `bacon`, `dx`, `trunk`, `watchexec`, `rust-analyzer`, plus `writers` from the config), whose files include a running executable, or whose path a launchd plist, systemd unit or listed config file names |
 | **Evicts** | Directories idle past `max_idle_days` (30); and when free space is under `keep_free` (10%), the least recently built until it reaches `target_free` (20%). Nothing built in the last `min_idle_days` (2) |
 | **Removes safely** | Re-checks, takes every profile lock, renames the directory aside, releases the locks, deletes. A Cargo that starts meanwhile waits, then builds cold, never into a half-deleted directory. An interrupted delete is finished by the next run |
 | **Measures** | Free space with `df` before and after every eviction. Copy-on-write clones share blocks, so allocated size overstates what a delete frees |
@@ -75,8 +75,12 @@ Checked against source on 2026-09-28:
 - **A deletion inside a build directory restarts its idle clock.** Activity is
   read from directory mtimes; `cargo sweep` on a directory makes it look freshly
   built.
-- **A cwd anywhere in the project holds its build directory**, so an idle shell
-  left open keeps its `target/`. `target-gc scan` names the process.
+- **Only a known build writer's cwd holds a build directory.** A shell, an agent
+  session or a service sitting in the project root does not: on 2026-10-07 two
+  such sessions and one service held 225 GiB for four to six days without
+  building. A dev server missing from the built-in list is still covered by
+  `min_idle_days` while it builds, and belongs in `writers` if it recreates
+  `target/` straight after a delete.
 - **macOS and Linux only.**
 
 ## License

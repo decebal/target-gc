@@ -10,7 +10,7 @@
       "name": "target-gc",
       "source": "./",
       "description": "Free disk space held by Cargo build directories without breaking a build, a dev server or a service.",
-      "version": "0.1.0"
+      "version": "0.2.0"
     }
   ]
 }

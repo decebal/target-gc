@@ -9,7 +9,7 @@ use std::time::Duration;
 use common::{backdate, backdate_tree, cargo_target, scratch, DAY};
 use target_gc::discover::target_at;
 use target_gc::evict::{evict, remove_trash, Refusal};
-use target_gc::liveness::{Evidence, Kind};
+use target_gc::liveness::{Evidence, Kind, DEFAULT_WRITERS};
 
 fn leftovers(dir: &std::path::Path) -> Vec<String> {
     fs::read_dir(dir)
@@ -26,7 +26,7 @@ fn an_idle_directory_is_removed_and_leaves_nothing_behind() {
     fs::write(root.join("proj/Cargo.toml"), "[package]\n").expect("manifest");
     backdate_tree(&target, 40 * DAY);
 
-    evict(&target_at(target.clone()), &[]).expect("evict");
+    evict(&target_at(target.clone()), &[], &[]).expect("evict");
     assert!(!target.exists());
     assert_eq!(leftovers(&root.join("proj")), ["Cargo.toml"]);
     let _ = fs::remove_dir_all(&root);
@@ -40,7 +40,7 @@ fn a_build_that_holds_a_lock_keeps_its_directory() {
     let build = File::open(target.join("debug/.cargo-lock")).expect("open");
     build.lock().expect("lock");
 
-    let refused = evict(&t, &[]).expect_err("evicted under a held lock");
+    let refused = evict(&t, &[], &[]).expect_err("evicted under a held lock");
     assert!(matches!(refused, Refusal::Skipped(_)), "{refused:?}");
     assert!(target.join("debug/deps").exists());
     drop(build);
@@ -55,7 +55,7 @@ fn a_directory_built_after_the_scan_is_left_alone() {
     let scanned = target_at(target.clone());
     backdate(&target.join("debug/deps"), Duration::from_secs(5));
 
-    let refused = evict(&scanned, &[]).expect_err("evicted a rebuilt directory");
+    let refused = evict(&scanned, &[], &[]).expect_err("evicted a rebuilt directory");
     assert_eq!(refused.reason(), "built since the scan");
     let _ = fs::remove_dir_all(&root);
 }
@@ -71,9 +71,29 @@ fn a_process_in_the_project_keeps_it() {
         kind: Kind::Cwd,
         path: root.join("proj"),
     };
-    assert!(evict(&t, &[dev_server]).is_err());
+    assert!(evict(&t, &[dev_server], &writers()).is_err());
     assert!(target.exists());
     let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_session_that_only_sits_in_the_project_does_not_keep_it() {
+    let root = scratch("evict-idle-session");
+    let target = cargo_target(&root.join("proj/target"));
+    backdate_tree(&target, 40 * DAY);
+    let session = Evidence {
+        pid: 8,
+        command: "2.1.287".into(),
+        kind: Kind::Cwd,
+        path: root.join("proj"),
+    };
+    evict(&target_at(target.clone()), &[session], &writers()).expect("evict");
+    assert!(!target.exists());
+    let _ = fs::remove_dir_all(&root);
+}
+
+fn writers() -> Vec<String> {
+    DEFAULT_WRITERS.iter().map(|w| (*w).to_string()).collect()
 }
 
 #[test]
@@ -87,7 +107,7 @@ fn an_untagged_directory_is_refused_even_if_the_plan_named_it() {
         project: root.join("proj"),
         last_activity: std::time::SystemTime::now(),
     };
-    assert!(evict(&t, &[]).is_err());
+    assert!(evict(&t, &[], &[]).is_err());
     assert!(dir.join("es5.js").exists());
     let _ = fs::remove_dir_all(&root);
 }

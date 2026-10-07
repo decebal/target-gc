@@ -26,6 +26,12 @@ max_idle_days = "30"
 # Paths never touched.
 protect = []
 
+# Extra process names that write into target/ while running, added to the
+# built-in list (cargo, cargo-watch, cargo-leptos, bacon, dx, trunk, watchexec,
+# rust-analyzer). One of these with its working directory in a project keeps
+# that project's build directory; any other process there does not.
+writers = []
+
 # Files that may name a binary inside a build directory, in addition to every
 # launchd plist and systemd unit. A directory named in any of them is kept.
 scan_files = [

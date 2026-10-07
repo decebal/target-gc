@@ -8,10 +8,13 @@
 //!   `<target>/.cargo-lock`; a cleaner that tests that path sees "no build" on
 //!   every run. A non-blocking exclusive `flock` attempt that fails means a
 //!   build holds the profile.
-//! - **Processes.** A process whose cwd is inside the project (an editor, a dev
-//!   server such as `dx serve` that writes into `target/` and recreates it
-//!   within seconds of a delete, an agent session) or whose executable lives in
-//!   the build directory (a service running a `target/release` binary).
+//! - **Processes.** A process whose executable lives in the build directory (a
+//!   service running a `target/release` binary), or a known build writer whose
+//!   cwd is inside the project (a dev server such as `dx serve` recreates
+//!   `target/` within seconds of a delete). Any other process with its cwd in
+//!   the project holds nothing: an agent session or a service sitting in the
+//!   repo root pinned 225 GiB for days on 2026-10-07 without writing a byte,
+//!   and `min_idle` already protects a directory that is actually being built.
 //!
 //! A process snapshot that cannot be taken is not "nobody is using it": the
 //! run refuses to evict anything.
@@ -77,20 +80,45 @@ pub fn hold_locks(target: &Path) -> Result<Vec<File>, PathBuf> {
     Ok(held)
 }
 
+/// Processes that write into `target/` while running, so deleting it under them
+/// frees nothing for long. Extended by the `writers` config key.
+pub const DEFAULT_WRITERS: &[&str] = &[
+    "cargo",
+    "cargo-watch",
+    "cargo-leptos",
+    "bacon",
+    "dx",
+    "trunk",
+    "watchexec",
+    "rust-analyzer",
+];
+
+/// Linux `comm` is cut at 15 bytes, so a truncated name matches the writer it
+/// is a prefix of.
+fn is_writer(command: &str, writers: &[String]) -> bool {
+    writers
+        .iter()
+        .any(|w| w == command || (command.len() == 15 && w.starts_with(command)))
+}
+
 /// The process evidence that holds this build directory, if any.
-pub fn owner<'a>(target: &Target, evidence: &'a [Evidence]) -> Option<&'a Evidence> {
+pub fn owner<'a>(
+    target: &Target,
+    evidence: &'a [Evidence],
+    writers: &[String],
+) -> Option<&'a Evidence> {
     evidence.iter().find(|e| match e.kind {
-        Kind::Cwd => is_under(&e.path, &target.project),
+        Kind::Cwd => is_under(&e.path, &target.project) && is_writer(&e.command, writers),
         Kind::Exe => is_under(&e.path, &target.path),
     })
 }
 
 /// Everything that holds this build directory right now, locks first.
-pub fn hold(target: &Target, evidence: &[Evidence]) -> Option<Hold> {
+pub fn hold(target: &Target, evidence: &[Evidence], writers: &[String]) -> Option<Hold> {
     if let Some(lock) = held_lock(&target.path) {
         return Some(Hold::Locked(lock));
     }
-    owner(target, evidence).map(|e| Hold::InUse {
+    owner(target, evidence, writers).map(|e| Hold::InUse {
         pid: e.pid,
         command: e.command.clone(),
     })
