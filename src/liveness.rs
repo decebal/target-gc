@@ -15,6 +15,8 @@
 //!   the project holds nothing: an agent session or a service sitting in the
 //!   repo root pinned 225 GiB for days on 2026-10-07 without writing a byte,
 //!   and `min_idle` already protects a directory that is actually being built.
+//!   Under disk pressure such a process keeps the directory on `min_idle`
+//!   rather than the shorter pressure floor (see [`occupied`]).
 //!
 //! A process snapshot that cannot be taken is not "nobody is using it": the
 //! run refuses to evict anything.
@@ -86,6 +88,8 @@ pub const DEFAULT_WRITERS: &[&str] = &[
     "cargo",
     "cargo-watch",
     "cargo-leptos",
+    "cargo-nextest",
+    "cargo-llvm-cov",
     "bacon",
     "dx",
     "trunk",
@@ -111,6 +115,14 @@ pub fn owner<'a>(
         Kind::Cwd => is_under(&e.path, &target.project) && is_writer(&e.command, writers),
         Kind::Exe => is_under(&e.path, &target.path),
     })
+}
+
+/// Whether any process has its cwd in the project. Not a hold: it only keeps
+/// the directory on `min_idle` while the disk is under pressure.
+pub fn occupied(target: &Target, evidence: &[Evidence]) -> bool {
+    evidence
+        .iter()
+        .any(|e| e.kind == Kind::Cwd && is_under(&e.path, &target.project))
 }
 
 /// Everything that holds this build directory right now, locks first.

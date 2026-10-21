@@ -10,8 +10,13 @@
 //!   between the two levels is the hysteresis: without it every run would
 //!   trim one directory, cross the line, and trim again next hour.
 //!
-//! Neither reason reaches a directory built within `min_idle`, or one that is
-//! held (a build running, a process inside, a service pointing at it).
+//! Neither reason reaches a directory that is held (a build running, a process
+//! inside, a service pointing at it), or one built within `min_idle`. Under
+//! pressure the floor drops to `pressure_min_idle` for a directory whose
+//! project no process sits in: a full disk fails every build on the machine,
+//! and an evicted directory nobody is near costs one rebuild. A shell or agent
+//! session in the project may be running its binaries between builds, so an
+//! occupied directory keeps `min_idle`.
 
 use std::time::{Duration, SystemTime};
 
@@ -22,6 +27,8 @@ pub struct Policy {
     pub keep_free: u64,
     pub target_free: u64,
     pub min_idle: Duration,
+    /// Replaces `min_idle` while free space is below `keep_free`.
+    pub pressure_min_idle: Duration,
     /// `None` disables expiry: eviction happens only under pressure.
     pub max_idle: Option<Duration>,
 }
@@ -30,6 +37,8 @@ pub struct Policy {
 pub struct Candidate {
     pub target: Target,
     pub hold: Option<Hold>,
+    /// Some process has its cwd in the project without holding the directory.
+    pub occupied: bool,
 }
 
 #[derive(Debug, Default)]
@@ -40,6 +49,10 @@ pub struct Plan {
     pub queue: Vec<Target>,
     pub held: Vec<(Target, Hold)>,
     pub young: Vec<Target>,
+    /// Not held and built within `min_idle`, whichever floor applied: the
+    /// directories a trim or a scratch sweep may touch. Includes queued ones,
+    /// which are not all evicted once free space reaches `target_free`.
+    pub recent: Vec<Target>,
     pub pressure: bool,
 }
 
@@ -54,7 +67,15 @@ pub fn plan(candidates: Vec<Candidate>, policy: &Policy, available: u64, now: Sy
             continue;
         }
         let idle = c.target.idle(now);
+        let floor = if out.pressure && !c.occupied {
+            policy.pressure_min_idle
+        } else {
+            policy.min_idle
+        };
         if idle < policy.min_idle {
+            out.recent.push(c.target.clone());
+        }
+        if idle < floor {
             out.young.push(c.target);
         } else if policy.max_idle.is_some_and(|max| idle >= max) {
             out.expired.push(c.target);

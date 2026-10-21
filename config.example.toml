@@ -6,8 +6,10 @@
 
 [target-gc]
 # Where to look for Cargo build directories. Dot-directories are scanned
-# (agent worktrees and tool checkouts often live in them).
-roots = ["~"]
+# (agent worktrees and tool checkouts often live in them). The default is home,
+# /tmp and $TMPDIR, each resolved to its real path; setting roots replaces all
+# three.
+# roots = ["~"]
 
 # Never descended into.
 skip = ["~/Library", "~/Pictures", "~/Music", "~/Movies"]
@@ -17,19 +19,33 @@ skip = ["~/Library", "~/Pictures", "~/Music", "~/Movies"]
 keep_free   = "10%"
 target_free = "20%"
 
-# Nothing built more recently than this is ever evicted. Minimum 1.
+# Nothing built more recently than this is evicted while some process (a
+# shell, an agent session) has its working directory in the project. Minimum 1.
 min_idle_days = "2"
+
+# Under pressure, a directory whose project no process sits in may go once it
+# is this many hours idle, so a disk filled by today's worktrees can still be
+# relieved. Eviction still refuses a directory with a build running, a build
+# writer in the project, or one built since the scan. Minimum 1, at most
+# min_idle_days.
+pressure_min_idle_hours = "1"
 
 # Evict past this whatever the free space. "0" means only under pressure.
 max_idle_days = "30"
+
+# In a build directory that is kept, delete deps/ artifacts superseded by two
+# newer builds of the same crate and untouched this long. A deleted artifact
+# costs at most a rebuild of that crate. "0" turns the trim off.
+trim_after_days = "3"
 
 # Paths never touched.
 protect = []
 
 # Extra process names that write into target/ while running, added to the
-# built-in list (cargo, cargo-watch, cargo-leptos, bacon, dx, trunk, watchexec,
-# rust-analyzer). One of these with its working directory in a project keeps
-# that project's build directory; any other process there does not.
+# built-in list (cargo, cargo-watch, cargo-leptos, cargo-nextest,
+# cargo-llvm-cov, bacon, dx, trunk, watchexec, rust-analyzer). One of these with
+# its working directory in a project keeps that project's build directory; any
+# other process there keeps it only within min_idle_days.
 writers = []
 
 # Files that may name a binary inside a build directory, in addition to every
