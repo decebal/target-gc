@@ -18,7 +18,7 @@ use target_gc::evict::{self, Refusal};
 use target_gc::liveness::{self, Evidence};
 use target_gc::plan::{self, Candidate, Policy};
 use target_gc::state::{self, Record};
-use target_gc::{human_age, human_bytes, protect, scratch, Hold, Target, DAY};
+use target_gc::{human_age, human_bytes, protect, scratch, trim, Hold, Target, DAY};
 
 /// A process snapshot older than this is retaken before the next eviction.
 const EVIDENCE_TTL: Duration = Duration::from_secs(20);
@@ -127,6 +127,7 @@ struct Survey {
     unreadable: usize,
     incomplete: bool,
     evidence: Vec<Evidence>,
+    sources: Vec<protect::Source>,
 }
 
 fn survey(settings: &Settings, home: &Path, deadline: Instant) -> Result<Survey, String> {
@@ -146,7 +147,12 @@ fn survey(settings: &Settings, home: &Path, deadline: Instant) -> Result<Survey,
         .map(|target| {
             let hold = protect::protection(&target, home, &settings.protect, &sources)
                 .or_else(|| liveness::hold(&target, &evidence, &settings.writers));
-            Candidate { target, hold }
+            let occupied = liveness::occupied(&target, &evidence);
+            Candidate {
+                target,
+                hold,
+                occupied,
+            }
         })
         .collect();
     Ok(Survey {
@@ -156,7 +162,42 @@ fn survey(settings: &Settings, home: &Path, deadline: Instant) -> Result<Survey,
         unreadable: found.unreadable,
         incomplete: found.incomplete,
         evidence,
+        sources,
     })
+}
+
+/// Build directories a trim may touch: built recently, or held only because a
+/// service names a file in them. A directory waiting to expire is left alone,
+/// because a delete inside `deps/` restarts its idle clock.
+fn trimmable(plan: &plan::Plan) -> Vec<&Target> {
+    plan.recent
+        .iter()
+        .chain(
+            plan.held
+                .iter()
+                .filter(|(_, h)| matches!(h, Hold::Referenced(_)))
+                .map(|(t, _)| t),
+        )
+        .collect()
+}
+
+fn trim_plans<'a>(
+    targets: &[&'a Target],
+    cutoff: SystemTime,
+    evidence: &[Evidence],
+    sources: &[protect::Source],
+) -> Vec<(&'a Target, trim::TrimPlan)> {
+    let keep = |p: &Path| {
+        let spelled = p.to_string_lossy();
+        evidence.iter().any(|e| e.path == p)
+            || sources.iter().any(|s| s.text.contains(spelled.as_ref()))
+    };
+    targets
+        .iter()
+        .filter(|t| liveness::held_lock(&t.path).is_none())
+        .map(|t| (*t, trim::plan(&t.path, cutoff, &keep)))
+        .filter(|(_, p)| !p.artifacts.is_empty())
+        .collect()
 }
 
 fn policy(settings: &Settings, space: Space) -> Result<Policy, String> {
@@ -169,6 +210,7 @@ fn policy(settings: &Settings, space: Space) -> Result<Policy, String> {
         keep_free,
         target_free,
         min_idle: settings.min_idle,
+        pressure_min_idle: settings.pressure_min_idle,
         max_idle: settings.max_idle,
     })
 }
@@ -255,9 +297,13 @@ fn run(settings: &Settings, home: &Path, args: &Args) -> i32 {
     let home_dev = fs::metadata(home).map(|m| m.dev()).ok();
     let now = SystemTime::now();
     let plan = plan::plan(s.candidates, &policy, s.space.available, now);
+    let trims = settings.trim_after.map_or_else(Vec::new, |after| {
+        trim_plans(&trimmable(&plan), now - after, &s.evidence, &s.sources)
+    });
 
     if args.dry_run {
         print_plan(&plan, &policy, s.space, now);
+        print_trims(&trims);
         return 0;
     }
 
@@ -283,7 +329,14 @@ fn run(settings: &Settings, home: &Path, args: &Args) -> i32 {
         }
         let allocated = discover::allocated_bytes(&target.path);
         let before = *available;
-        let result = evict::evict(target, &evidence, &settings.writers);
+        let result = if target.idle(now) < policy.min_idle && liveness::occupied(target, &evidence)
+        {
+            Err(Refusal::Skipped(
+                "a process moved into the project since the scan".into(),
+            ))
+        } else {
+            evict::evict(target, &evidence, &settings.writers)
+        };
         let after = disk::space(home).map_or(before, |sp| sp.available);
         *available = after;
         let idle = human_age(target.idle(now));
@@ -337,7 +390,55 @@ fn run(settings: &Settings, home: &Path, args: &Args) -> i32 {
         }
     }
 
-    let swept = sweep_scratch(&plan.young);
+    let mut trimmed = 0usize;
+    for (target, trim_plan) in &trims {
+        if Instant::now() >= deadline {
+            break;
+        }
+        if !target.path.is_dir() {
+            continue;
+        }
+        let before = available;
+        let result = trim::trim(&target.path, trim_plan);
+        let after = disk::space(home).map_or(before, |sp| sp.available);
+        available = after;
+        match result {
+            Ok((removed, errors)) => {
+                trimmed += removed;
+                let freed = after.saturating_sub(before);
+                if !args.quiet {
+                    println!(
+                        "trimmed  {} — {removed} superseded artifacts, {} allocated, free space moved {}",
+                        target.path.display(),
+                        human_bytes(trim_plan.allocated),
+                        human_bytes(freed)
+                    );
+                }
+                for e in &errors {
+                    println!("FAILED   {e}");
+                }
+                log.push(json!({
+                    "trimmed": target.path,
+                    "artifacts": removed,
+                    "allocated": trim_plan.allocated,
+                    "freed": freed,
+                    "errors": errors,
+                }));
+            }
+            Err(lock) => {
+                if !args.quiet {
+                    println!(
+                        "skipped  {} — build running (lock held: {})",
+                        target.path.display(),
+                        lock.display()
+                    );
+                }
+                log.push(json!({ "trim_refused": target.path, "lock": lock }));
+            }
+        }
+    }
+
+    let swept = sweep_scratch(&plan.recent);
     let still_low = plan.pressure && available < policy.keep_free;
     let record = Record {
         finished_at: state::now_secs(),
@@ -352,6 +453,7 @@ fn run(settings: &Settings, home: &Path, args: &Args) -> i32 {
         "log": log,
         "held": plan.held.iter().map(|(t, h)| json!({ "path": t.path, "why": h.describe() })).collect::<Vec<_>>(),
         "scratch_dirs_removed": swept,
+        "artifacts_trimmed": trimmed,
         "unreadable_dirs": s.unreadable,
         "scan_incomplete": s.incomplete,
         "seconds": started.elapsed().as_secs(),
@@ -364,7 +466,7 @@ fn run(settings: &Settings, home: &Path, args: &Args) -> i32 {
         println!("{value}");
     } else if !args.quiet || still_low {
         println!(
-            "target-gc: {} → {} free; {evicted} evicted, {} held{}",
+            "target-gc: {} → {} free; {evicted} evicted, {trimmed} artifacts trimmed, {} held{}",
             human_bytes(s.space.available),
             human_bytes(available),
             plan.held.len(),
@@ -382,9 +484,9 @@ fn run(settings: &Settings, home: &Path, args: &Args) -> i32 {
 /// that are not building right now. Idle directories are left alone: a delete
 /// inside `deps/` moves its mtime, which would restart their idle clock and
 /// postpone the expiry that reclaims far more.
-fn sweep_scratch(young: &[Target]) -> usize {
+fn sweep_scratch(recent: &[Target]) -> usize {
     let cutoff = SystemTime::now() - DAY;
-    young
+    recent
         .iter()
         .filter(|t| t.path.is_dir() && liveness::held_lock(&t.path).is_none())
         .map(|t| scratch::sweep(&scratch::inspect(&t.path, cutoff)).0)
@@ -453,6 +555,38 @@ fn print_plan(plan: &plan::Plan, policy: &Policy, space: Space, now: SystemTime)
     for (t, h) in &plan.held {
         println!("  {} — {}", t.path.display(), h.describe());
     }
-    println!("\nbuilt too recently to touch: {}", plan.young.len());
+    println!(
+        "\nbuilt too recently to evict: {} (floor {}{})",
+        plan.young.len(),
+        human_age(policy.min_idle),
+        if plan.pressure {
+            format!(
+                ", {} where no process sits in the project",
+                human_age(policy.pressure_min_idle)
+            )
+        } else {
+            String::new()
+        }
+    );
     println!("Sizes are allocated bytes: an upper bound. Copy-on-write clones free less.");
+}
+
+fn print_trims(trims: &[(&Target, trim::TrimPlan)]) {
+    println!("\nwould trim superseded deps/ artifacts:");
+    if trims.is_empty() {
+        println!("  (none)");
+    }
+    let mut total = 0u64;
+    for (t, p) in trims {
+        total += p.allocated;
+        println!(
+            "  {:>10}  {} ({} artifacts)",
+            human_bytes(p.allocated),
+            t.path.display(),
+            p.artifacts.len()
+        );
+    }
+    if !trims.is_empty() {
+        println!("  {:>10}  total", human_bytes(total));
+    }
 }

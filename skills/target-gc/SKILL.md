@@ -39,7 +39,13 @@ If `target-gc` is not installed: `cargo install target-gc` (or
 
    Lists what would go: directories idle past `max_idle_days`, then, only if
    free space is under `keep_free`, the least recently built until free space
-   reaches `target_free`.
+   reaches `target_free`; under pressure a directory whose project no process
+   sits in qualifies once idle past `pressure_min_idle_hours`, not only past
+   `min_idle_days`. Last, the trim: in directories built recently or
+   kept because a service names a binary in them, the `deps/` artifacts
+   superseded by two newer builds of the same crate and untouched for
+   `trim_after_days`. Cargo never deletes an old hash, so a long-lived or
+   cloned build directory carries every build it ever did.
 
 3. **Run it.**
 
@@ -47,8 +53,8 @@ If `target-gc` is not installed: `cargo install target-gc` (or
    target-gc run
    ```
 
-   Each eviction prints the allocated size and how far free space actually
-   moved. Exit code 1 means the disk is still under the floor because
+   Each eviction and trim prints the allocated size and how far free space
+   actually moved. Exit code 1 means the disk is still under the floor because
    everything left is in use, protected or built too recently.
 
 4. **Report what happened** from `~/.local/state/target-gc/last-run.json`,
@@ -67,11 +73,13 @@ more than the space it frees.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `roots` | `["~"]` | Where to look |
+| `roots` | home, `/tmp`, `$TMPDIR` | Where to look, each resolved to its real path; setting it replaces all three |
 | `skip` | `~/Library`, `~/Pictures`, `~/Music`, `~/Movies` | Never descended into |
 | `keep_free` / `target_free` | `"10%"` / `"20%"` | Pressure starts below the first, continues to the second |
-| `min_idle_days` | `"2"` | Nothing built more recently is ever touched (minimum 1) |
+| `min_idle_days` | `"2"` | Nothing built more recently is evicted while a process sits in the project (minimum 1) |
+| `pressure_min_idle_hours` | `"1"` | Under pressure, the floor for a project no process sits in (minimum 1, at most `min_idle_days`) |
 | `max_idle_days` | `"30"` | Evicted past this whatever the free space; `"0"` = only under pressure |
+| `trim_after_days` | `"3"` | Superseded `deps/` artifacts older than this are trimmed from kept directories; `"0"` = never |
 | `protect` | `[]` | Paths never touched |
 | `scan_files` | shell rc files, `~/.claude.json`, … | Files that may name a binary inside a build directory |
 
@@ -91,6 +99,9 @@ run has happened for three hours. On macOS check the job with
   privacy protection can hide `~/Documents`, `~/Desktop` and `~/Downloads` from
   an agent's shell but not from the job. `last-run.json` is the record of what
   was actually removed.
-- Deleting files inside a build directory (`cargo sweep`) restarts its idle
-  clock.
+- Deleting files inside a build directory (`cargo sweep`, or the trim)
+  restarts its idle clock, so the trim never touches a directory waiting to
+  expire.
+- A trimmed artifact a build still wanted costs a rebuild of that crate. The
+  trim holds every Cargo lock while it deletes, so it never races a build.
 - macOS and Linux only.

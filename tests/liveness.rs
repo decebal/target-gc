@@ -14,7 +14,8 @@ use std::time::SystemTime;
 
 use common::{cargo_target, scratch};
 use target_gc::liveness::{
-    held_lock, hold_locks, owner, parse_lsof, snapshot_proc, Evidence, Kind, DEFAULT_WRITERS,
+    held_lock, hold_locks, occupied, owner, parse_lsof, snapshot_proc, Evidence, Kind,
+    DEFAULT_WRITERS,
 };
 use target_gc::Target;
 
@@ -124,6 +125,27 @@ fn a_process_that_only_sits_in_the_project_holds_nothing() {
         assert!(
             owner(&t, &[run_by(command, Kind::Cwd, "/p/app")], &w).is_none(),
             "{command} sitting in the project held the build dir"
+        );
+    }
+}
+
+#[test]
+fn any_process_sitting_in_the_project_occupies_it() {
+    let t = target_at("/p/app/target");
+    assert!(occupied(&t, &[run_by("zsh", Kind::Cwd, "/p/app/src")]));
+    assert!(!occupied(&t, &[run_by("zsh", Kind::Cwd, "/p")]));
+    assert!(!occupied(&t, &[run_by("zsh", Kind::Exe, "/p/app/bin/zsh")]));
+}
+
+/// `cargo nextest` execs `cargo-nextest`, which keeps no Cargo lock while its
+/// test binaries run; between two binaries only its cwd shows.
+#[test]
+fn test_drivers_in_the_project_hold_it() {
+    let t = target_at("/p/app/target");
+    for command in ["cargo-nextest", "cargo-llvm-cov"] {
+        assert!(
+            owner(&t, &[run_by(command, Kind::Cwd, "/p/app")], &writers()).is_some(),
+            "{command} in the project did not hold the build dir"
         );
     }
 }

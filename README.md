@@ -74,9 +74,10 @@ Without the plugin, `target-gc skill install` writes the same skill to
 
 | | |
 |---|---|
-| **Finds** | Every directory holding the `CACHEDIR.TAG` Cargo writes, under the configured roots. A directory merely *named* `target` is somebody's source, and is never touched |
-| **Holds** | A directory whose Cargo profile lock is held (`<target>/[<triple>/]<profile>/.cargo-lock`, `.cargo-build-lock`, `.cargo-artifact-lock`), whose project is the cwd of a known build writer (`cargo`, `cargo-watch`, `cargo-leptos`, `bacon`, `dx`, `trunk`, `watchexec`, `rust-analyzer`, plus `writers` from the config), whose files include a running executable, or whose path a launchd plist, systemd unit or listed config file names |
-| **Evicts** | Directories idle past `max_idle_days` (30); and when free space is under `keep_free` (10%), the least recently built until it reaches `target_free` (20%). Nothing built in the last `min_idle_days` (2) |
+| **Finds** | Every directory holding the `CACHEDIR.TAG` Cargo writes, under the configured roots (default: home, `/tmp` and `$TMPDIR`, where agent worktrees often live). A directory merely *named* `target` is somebody's source, and is never touched |
+| **Holds** | A directory whose Cargo profile lock is held (`<target>/[<triple>/]<profile>/.cargo-lock`, `.cargo-build-lock`, `.cargo-artifact-lock`), whose project is the cwd of a known build writer (`cargo`, `cargo-watch`, `cargo-leptos`, `cargo-nextest`, `cargo-llvm-cov`, `bacon`, `dx`, `trunk`, `watchexec`, `rust-analyzer`, plus `writers` from the config), whose files include a running executable, or whose path a launchd plist, systemd unit or listed config file names |
+| **Evicts** | Directories idle past `max_idle_days` (30); and when free space is under `keep_free` (10%), the least recently built until it reaches `target_free` (20%). Without pressure, nothing built in the last `min_idle_days` (2); under pressure, nothing built in the last `pressure_min_idle_hours` (1) in a project no process sits in, because a full disk fails every build and an evicted directory nobody is near costs one rebuild |
+| **Trims** | In a directory built recently, or kept because a service names a binary in it: `deps/` artifacts superseded by two newer hashes of the same crate and untouched for `trim_after_days` (3). Cargo never deletes an old hash; one cloned build directory carried sixteen 230 MB copies of the same test binary. Every Cargo lock is held while it deletes, and a removed artifact costs at most a rebuild of that crate |
 | **Removes safely** | Re-checks, takes every profile lock, renames the directory aside, releases the locks, deletes. A Cargo that starts meanwhile waits, then builds cold, never into a half-deleted directory. An interrupted delete is finished by the next run |
 | **Measures** | Free space with `df` before and after every eviction. Copy-on-write clones share blocks, so allocated size overstates what a delete frees |
 | **Reports** | `~/.local/state/target-gc/last-run.json`: every eviction, refusal and held directory |
@@ -90,7 +91,7 @@ Checked against source on 2026-09-28:
 
 | Tool | Finding |
 |---|---|
-| [cargo-sweep](https://github.com/holmgr/cargo-sweep) | Prunes inside one build directory by age or toolchain. No liveness check; its README says it lacks a maintainer |
+| [cargo-sweep](https://github.com/holmgr/cargo-sweep) | Prunes inside one build directory by age or toolchain, so it deletes a crate's only build once it is old enough. No liveness check; its README says it lacks a maintainer |
 | [cargo-clean-all](https://github.com/dnlmlr/cargo-clean-all) | Whole-directory deletion by last compile. Activity is the directory's mtime; no lock or process check |
 | [kondo](https://github.com/tbillington/kondo), cargo-wipe, cargo-cleaner | Cross-ecosystem artifact cleaners. No liveness check, no disk budget |
 | [cargo-broom](https://github.com/casoon/broom), [rldyour-cleaner](https://github.com/NDDev-OpenNetwork/rldyour-cleaner) | Lock `<target>/.cargo-lock`, which Cargo never creates (the lock is per profile), so the "build running" check can never fire |
@@ -109,9 +110,10 @@ Checked against source on 2026-09-28:
 - **Only a known build writer's cwd holds a build directory.** A shell, an agent
   session or a service sitting in the project root does not: on 2026-10-07 two
   such sessions and one service held 225 GiB for four to six days without
-  building. A dev server missing from the built-in list is still covered by
-  `min_idle_days` while it builds, and belongs in `writers` if it recreates
-  `target/` straight after a delete.
+  building. Such a process still keeps its directory for `min_idle_days`,
+  even under pressure, so a dev server missing from the built-in list is
+  covered while it builds, and belongs in `writers` if it recreates `target/`
+  straight after a delete.
 - **macOS and Linux only.**
 
 ## License

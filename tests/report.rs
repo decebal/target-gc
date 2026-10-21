@@ -1,9 +1,10 @@
 //! Free space, levels, settings, the session line, and the schedule files.
 
+use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::time::Duration;
 
-use target_gc::config::Settings;
+use target_gc::config::{canonical_roots, Settings};
 use target_gc::disk::{parse_df, Level, Space};
 use target_gc::install::{launchd_plist, systemd_service, LABEL};
 use target_gc::state::{hook_line, Record};
@@ -58,7 +59,10 @@ fn the_shipped_example_config_loads_to_the_defaults() {
 #[test]
 fn settings_default_and_override() {
     let d = settings("").expect("defaults");
-    assert_eq!(d.roots, vec![Path::new("/Users/me").to_path_buf()]);
+    assert_eq!(d.roots[0], Path::new("/Users/me"));
+    let tmp = std::fs::canonicalize("/tmp").expect("canonicalize /tmp");
+    assert!(d.roots.contains(&tmp), "{:?} lacks {tmp:?}", d.roots);
+    assert_eq!(d.trim_after, Some(Duration::from_secs(3 * 86_400)));
     assert_eq!(d.max_idle, Some(Duration::from_secs(30 * 86_400)));
 
     let s =
@@ -67,6 +71,28 @@ fn settings_default_and_override() {
     assert_eq!(s.roots, vec![Path::new("/Users/me/code").to_path_buf()]);
     assert_eq!(s.keep_free, Level::Bytes(40 * GIB));
     assert_eq!(s.max_idle, None, "\"0\" must disable expiry");
+}
+
+/// A root reached through a symlink is stored as its real path, so a dev
+/// server's cwd (reported real by lsof) still holds its build directory.
+#[test]
+fn a_root_behind_a_symlink_is_stored_as_its_real_path() {
+    let base = std::env::temp_dir().join(format!("target-gc-roots-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join("real/nested")).expect("mkdir");
+    let real = std::fs::canonicalize(base.join("real")).expect("canonicalize");
+    symlink(&real, base.join("link")).expect("symlink");
+
+    let roots = canonical_roots(
+        vec![base.join("link"), base.join("real/nested")],
+        Path::new("/Users/me"),
+    );
+    assert_eq!(
+        roots,
+        vec![real],
+        "nested root kept or symlink not resolved"
+    );
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// A configured writer adds to the defaults; listing one must not drop `dx`.
@@ -85,6 +111,20 @@ fn a_zero_idle_floor_is_refused() {
     assert!(settings("[target-gc]\nmin_idle_days = \"0\"\n").is_err());
     assert!(settings("[target-gc]\nkeep_free = \"plenty\"\n").is_err());
     assert!(settings("[target-gc]\nmin_idle_days = \"5\"\nmax_idle_days = \"3\"\n").is_err());
+    assert!(settings("[target-gc]\npressure_min_idle_hours = \"0\"\n").is_err());
+    assert!(
+        settings("[target-gc]\nmin_idle_days = \"1\"\npressure_min_idle_hours = \"25\"\n").is_err()
+    );
+}
+
+#[test]
+fn the_pressure_floor_defaults_to_an_hour_and_reads_hours() {
+    assert_eq!(
+        settings("").expect("defaults").pressure_min_idle,
+        Duration::from_secs(3_600)
+    );
+    let s = settings("[target-gc]\npressure_min_idle_hours = \"6\"\n").expect("override");
+    assert_eq!(s.pressure_min_idle, Duration::from_secs(6 * 3_600));
 }
 
 fn record(finished_at: u64) -> Record {

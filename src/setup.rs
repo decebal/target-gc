@@ -9,10 +9,12 @@ use target_gc::{discover, disk, install, skill, state};
 
 const CONFIG_TEMPLATE: &str = r#"# target-gc settings. Numbers are quoted strings.
 [target-gc]
-roots         = ["~"]
+# roots defaults to home, /tmp and $TMPDIR; setting it replaces all three.
+# roots       = ["~"]
 keep_free     = "10%"
 target_free   = "20%"
 min_idle_days = "2"
+pressure_min_idle_hours = "1"
 max_idle_days = "30"
 protect       = []
 "#;
@@ -170,9 +172,11 @@ USAGE:
     --config <path>   settings file (default: $XDG_CONFIG_HOME/target-gc/config.toml)
 
 A directory is a Cargo build directory only if Cargo's CACHEDIR.TAG is in it.
-It is held — never evicted — while a Cargo lock in it is held, while a process
-has its cwd in the project or runs a binary from it, or while a service
-definition or listed config file names a path inside it.
+It is held — never evicted — while a Cargo lock in it is held, while a build
+writer has its cwd in the project, while a process runs a binary from it, or
+while a service definition or listed config file names a path inside it.
+Nothing built within min_idle_days is evicted; under disk pressure that floor
+drops to pressure_min_idle_hours unless some process sits in the project.
 
 Exit codes: 0 done; 1 still under the floor after the run; 2 could not run."
     );

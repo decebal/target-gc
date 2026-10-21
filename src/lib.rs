@@ -35,7 +35,9 @@ pub mod scratch;
 pub mod skill;
 pub mod state;
 pub mod toml_subset;
+pub mod trim;
 
+pub const HOUR: Duration = Duration::from_secs(3_600);
 pub const DAY: Duration = Duration::from_secs(86_400);
 
 /// One Cargo build directory found on disk.
