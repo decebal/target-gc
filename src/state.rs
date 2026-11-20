@@ -64,11 +64,21 @@ pub fn now_secs() -> u64 {
 }
 
 pub fn write(dir: &Path, value: &Value) -> Result<(), String> {
+    write_file(dir, RECORD, value)
+}
+
+/// Write `name` in the state directory through a rename, so a reader never
+/// sees half a file.
+pub fn write_file(dir: &Path, name: &str, value: &Value) -> Result<(), String> {
     fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let tmp = dir.join(format!("{RECORD}.tmp"));
+    let tmp = dir.join(format!("{name}.tmp"));
     let body = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
     fs::write(&tmp, body).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    fs::rename(&tmp, dir.join(RECORD)).map_err(|e| e.to_string())
+    fs::rename(&tmp, dir.join(name)).map_err(|e| e.to_string())
+}
+
+pub fn read_file(dir: &Path, name: &str) -> Option<Value> {
+    serde_json::from_str(&fs::read_to_string(dir.join(name)).ok()?).ok()
 }
 
 pub fn read(dir: &Path) -> Option<Record> {

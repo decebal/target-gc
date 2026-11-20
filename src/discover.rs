@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
-use crate::Target;
+use crate::{node, Target};
 
 /// The standard cache-directory signature (bford.info/cachedir).
 const CACHEDIR_SIGNATURE: &str = "Signature: 8a477f597d28d172789f06886806bc55";
@@ -44,6 +44,10 @@ pub struct Found {
     /// Build directories an interrupted run renamed aside and never finished
     /// deleting.
     pub trash: Vec<PathBuf>,
+    /// `node_modules` that belong to a project; see [`crate::node`].
+    pub node_modules: Vec<PathBuf>,
+    /// `node_modules` an interrupted run renamed aside.
+    pub node_trash: Vec<PathBuf>,
     /// Directories that could not be read (permission, a vanished path).
     pub unreadable: usize,
     /// The walk hit its deadline; what was found is still accurate, the rest
@@ -82,7 +86,20 @@ pub fn find(walk: &Walk<'_>) -> Found {
             let path = entry.path();
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if SKIP_NAMES.contains(&name.as_ref()) || walk.skip_paths.contains(&path) {
+            if walk.skip_paths.contains(&path) {
+                continue;
+            }
+            if name == node::DIR_NAME {
+                if node::is_project_deps(&path, walk.roots) {
+                    found.node_modules.push(path);
+                }
+                continue;
+            }
+            if name.starts_with(node::TRASH_PREFIX) {
+                found.node_trash.push(path);
+                continue;
+            }
+            if SKIP_NAMES.contains(&name.as_ref()) {
                 continue;
             }
             if name.starts_with(TRASH_PREFIX) {
@@ -101,6 +118,7 @@ pub fn find(walk: &Walk<'_>) -> Found {
         }
     }
     found.targets.sort_by(|a, b| a.path.cmp(&b.path));
+    found.node_modules.sort();
     found
 }
 
