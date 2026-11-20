@@ -12,6 +12,8 @@
 //! scan_files    = [...]    # files that may name a binary inside a build dir
 //! writers       = []       # extra process names that write into target/
 //! trim_after_days = "3"    # trim superseded deps/ artifacts older than this; "0" = never
+//! bloat_min_size = "5G"    # propose unused directories this big for approval; "0" = never
+//! node_modules_idle_days = "60"  # remove node_modules of projects idle this long; "0" = never
 //! ```
 //!
 //! Numbers are quoted: the reader supports strings and lists only, on purpose
@@ -43,6 +45,12 @@ pub struct Settings {
     /// Superseded `deps/` artifacts older than this are trimmed from kept
     /// build directories. `None` disables the trim. See [`crate::trim`].
     pub trim_after: Option<Duration>,
+    /// Unused build directories at least this big are proposed for an
+    /// approved eviction. `None` disables proposals. See [`crate::propose`].
+    pub bloat_min: Option<u64>,
+    /// `node_modules` of projects idle this long are removed. `None` disables
+    /// it. See [`crate::node`].
+    pub node_idle: Option<Duration>,
     pub max_depth: usize,
     pub deadline: Duration,
 }
@@ -88,7 +96,13 @@ impl Settings {
         let paths = |raw: &[&str]| raw.iter().map(|r| expand(r, home)).collect::<Vec<_>>();
         Settings {
             roots: default_roots(home),
-            skip: paths(&["~/Library", "~/Pictures", "~/Music", "~/Movies"]),
+            skip: paths(&[
+                "~/Library",
+                "~/Pictures",
+                "~/Music",
+                "~/Movies",
+                "~/OrbStack",
+            ]),
             keep_free: Level::Percent(10),
             target_free: Level::Percent(20),
             min_idle: 2 * DAY,
@@ -103,9 +117,13 @@ impl Settings {
                 "~/.bashrc",
                 "~/.profile",
                 "~/.config/fish/config.fish",
+                "~/Library/Application Support/Claude/claude_desktop_config.json",
+                "~/.cursor/mcp.json",
             ]),
             writers: DEFAULT_WRITERS.iter().map(|w| (*w).to_string()).collect(),
             trim_after: Some(3 * DAY),
+            bloat_min: Some(5 * 1024 * 1024 * 1024),
+            node_idle: Some(60 * DAY),
             max_depth: 10,
             deadline: Duration::from_secs(240),
         }
@@ -165,6 +183,18 @@ impl Settings {
             let d = days(v, "trim_after_days")?;
             s.trim_after = (!d.is_zero()).then_some(d);
         }
+        if let Some(v) = config.string(&key("bloat_min_size")) {
+            let Some(Level::Bytes(b)) = Level::parse(v) else {
+                return Err(format!(
+                    "bloat_min_size: cannot read {v:?} as a size like 5G"
+                ));
+            };
+            s.bloat_min = (b > 0).then_some(b);
+        }
+        if let Some(v) = config.string(&key("node_modules_idle_days")) {
+            let d = days(v, "node_modules_idle_days")?;
+            s.node_idle = (!d.is_zero()).then_some(d);
+        }
         if let Some(v) = config.string(&key("max_depth")) {
             s.max_depth = v
                 .parse()
@@ -200,6 +230,11 @@ impl Settings {
         }
         if self.trim_after.is_some_and(|t| t < DAY) {
             return Err("trim_after_days must be at least 1, or 0 to disable".into());
+        }
+        if self.node_idle.is_some_and(|n| n < self.min_idle) {
+            return Err(
+                "node_modules_idle_days must not be below min_idle_days, or 0 to disable".into(),
+            );
         }
         if self.roots.is_empty() {
             return Err("roots is empty: nothing would be scanned".into());

@@ -5,6 +5,7 @@
 mod setup;
 
 use std::fs::{self, File};
+use std::io::{BufRead, IsTerminal, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::exit;
@@ -17,15 +18,21 @@ use target_gc::disk::{self, Space};
 use target_gc::evict::{self, Refusal};
 use target_gc::liveness::{self, Evidence};
 use target_gc::plan::{self, Candidate, Policy};
+use target_gc::propose::{self, Proposal};
 use target_gc::state::{self, Record};
-use target_gc::{human_age, human_bytes, protect, scratch, trim, Hold, Target, DAY};
+use target_gc::{human_age, human_bytes, node, protect, scratch, trim, Hold, Target, DAY};
 
 /// A process snapshot older than this is retaken before the next eviction.
 const EVIDENCE_TTL: Duration = Duration::from_secs(20);
 
+/// Approved evictions, one JSON object per line.
+const APPROVED_LOG: &str = "approved.jsonl";
+
 struct Args {
     command: String,
     sub: Option<String>,
+    /// Every positional after the command.
+    paths: Vec<PathBuf>,
     config: Option<PathBuf>,
     dir: Option<PathBuf>,
     dry_run: bool,
@@ -55,7 +62,7 @@ fn main() {
             args.dir.as_deref(),
             &home,
         )),
-        "scan" | "run" => {
+        "scan" | "run" | "propose" | "evict" | "review" => {
             let settings = match Settings::load(&config_path, &home) {
                 Ok(s) => s,
                 Err(e) => {
@@ -63,10 +70,12 @@ fn main() {
                     exit(2);
                 }
             };
-            let code = if args.command == "scan" {
-                scan(&settings, &home, &args)
-            } else {
-                run(&settings, &home, &args)
+            let code = match args.command.as_str() {
+                "scan" => scan(&settings, &home, &args),
+                "run" => run(&settings, &home, &args),
+                "propose" => propose_cmd(&settings, &home, &args),
+                "evict" => evict_paths(&settings, &home, &args.paths),
+                _ => review(&settings, &home),
             };
             exit(code);
         }
@@ -81,6 +90,7 @@ fn parse_args(argv: &[String]) -> Args {
     let mut args = Args {
         command: "help".into(),
         sub: None,
+        paths: Vec::new(),
         config: None,
         dir: None,
         dry_run: false,
@@ -106,7 +116,8 @@ fn parse_args(argv: &[String]) -> Args {
                 if positional == 0 {
                     args.command = other.to_string();
                 } else {
-                    args.sub = Some(other.to_string());
+                    args.sub.get_or_insert_with(|| other.to_string());
+                    args.paths.push(PathBuf::from(other));
                 }
                 positional += 1;
             }
@@ -128,6 +139,15 @@ struct Survey {
     incomplete: bool,
     evidence: Vec<Evidence>,
     sources: Vec<protect::Source>,
+    /// Project `node_modules` and what holds each, when anything does.
+    node: Vec<(Target, Option<Hold>)>,
+    node_trash: Vec<PathBuf>,
+}
+
+/// The walk gets three fifths of the deadline, so the process snapshot, the
+/// evictions and the proposals always get the rest.
+fn walk_deadline(started: Instant, settings: &Settings) -> Instant {
+    started + settings.deadline * 3 / 5
 }
 
 fn survey(settings: &Settings, home: &Path, deadline: Instant) -> Result<Survey, String> {
@@ -155,6 +175,19 @@ fn survey(settings: &Settings, home: &Path, deadline: Instant) -> Result<Survey,
             }
         })
         .collect();
+    let node_deps = if settings.node_idle.is_some() {
+        found
+            .node_modules
+            .into_iter()
+            .map(|path| {
+                let deps = node::at(path);
+                let hold = node::hold(&deps, home, &settings.protect, &sources, &evidence);
+                (deps, hold)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     Ok(Survey {
         space,
         candidates,
@@ -163,6 +196,8 @@ fn survey(settings: &Settings, home: &Path, deadline: Instant) -> Result<Survey,
         incomplete: found.incomplete,
         evidence,
         sources,
+        node: node_deps,
+        node_trash: found.node_trash,
     })
 }
 
@@ -216,8 +251,7 @@ fn policy(settings: &Settings, space: Space) -> Result<Policy, String> {
 }
 
 fn scan(settings: &Settings, home: &Path, args: &Args) -> i32 {
-    let deadline = Instant::now() + settings.deadline;
-    let s = match survey(settings, home, deadline) {
+    let s = match survey(settings, home, walk_deadline(Instant::now(), settings)) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("target-gc: {e}");
@@ -286,7 +320,7 @@ fn run(settings: &Settings, home: &Path, args: &Args) -> i32 {
         return 0;
     };
 
-    let s = match survey(settings, home, deadline) {
+    let s = match survey(settings, home, walk_deadline(started, settings)) {
         Ok(s) => s,
         Err(e) => return fail(&state_dir, &e, args),
     };
@@ -300,16 +334,49 @@ fn run(settings: &Settings, home: &Path, args: &Args) -> i32 {
     let trims = settings.trim_after.map_or_else(Vec::new, |after| {
         trim_plans(&trimmable(&plan), now - after, &s.evidence, &s.sources)
     });
+    let node_held = s.node.iter().filter(|(_, h)| h.is_some()).count();
+    let node_due = settings
+        .node_idle
+        .map_or_else(Vec::new, |idle| node::expired(s.node, idle, now));
 
     if args.dry_run {
         print_plan(&plan, &policy, s.space, now);
         print_trims(&trims);
+        if let Some(idle) = settings.node_idle {
+            println!(
+                "\nwould remove node_modules of projects idle past {} ({node_held} held):",
+                human_age(idle)
+            );
+            if node_due.is_empty() {
+                println!("  (none)");
+            }
+            for d in &node_due {
+                println!("  {} (idle {})", d.path.display(), human_age(d.idle(now)));
+            }
+        }
+        if let Some(min) = settings.bloat_min {
+            let (items, _) = proposals_from(&plan, &s.evidence, min, deadline, now);
+            println!(
+                "\nwould propose for approval (unused, {} or more):",
+                human_bytes(min)
+            );
+            if items.is_empty() {
+                println!("  (none)");
+            }
+            for p in &items {
+                println!("  {}", propose::describe(p));
+            }
+        }
         return 0;
     }
 
     let mut log: Vec<Value> = Vec::new();
     for trash in &s.trash {
         let result = evict::remove_trash(trash);
+        log.push(json!({ "trash": trash, "error": result.err() }));
+    }
+    for trash in &s.node_trash {
+        let result = node::remove_trash(trash);
         log.push(json!({ "trash": trash, "error": result.err() }));
     }
 
@@ -438,7 +505,54 @@ fn run(settings: &Settings, home: &Path, args: &Args) -> i32 {
         }
     }
 
+    let mut node_removed = 0usize;
+    for deps in &node_due {
+        if Instant::now() >= deadline {
+            break;
+        }
+        if evidence_at.elapsed() > EVIDENCE_TTL {
+            let Some(fresh) = liveness::snapshot() else {
+                break;
+            };
+            evidence = fresh;
+            evidence_at = Instant::now();
+        }
+        let before = available;
+        let result = match node::hold(deps, home, &settings.protect, &s.sources, &evidence) {
+            Some(h) => Err(Refusal::Skipped(h.describe())),
+            None => node::remove(deps),
+        };
+        let after = disk::space(home).map_or(before, |sp| sp.available);
+        available = after;
+        let idle = human_age(deps.idle(now));
+        match result {
+            Ok(()) => {
+                node_removed += 1;
+                let freed = after.saturating_sub(before);
+                println!(
+                    "removed  {} (project idle {idle}) — free space moved {}",
+                    deps.path.display(),
+                    human_bytes(freed)
+                );
+                log.push(
+                    json!({ "node_modules_removed": deps.path, "idle": idle, "freed": freed }),
+                );
+            }
+            Err(refusal) => {
+                if !args.quiet || matches!(refusal, Refusal::Failed(_)) {
+                    println!("skipped  {} — {}", deps.path.display(), refusal.reason());
+                }
+                log.push(json!({ "refused": deps.path, "reason": refusal.reason() }));
+            }
+        }
+    }
+
     let swept = sweep_scratch(&plan.recent);
+    let (proposals, sizing_cut) = settings.bloat_min.map_or((Vec::new(), false), |min| {
+        proposals_from(&plan, &evidence, min, deadline, now)
+    });
+    save_proposals(&state_dir, &proposals);
+    let proposed: u64 = proposals.iter().map(|p| p.allocated).sum();
     let still_low = plan.pressure && available < policy.keep_free;
     let record = Record {
         finished_at: state::now_secs(),
@@ -454,6 +568,11 @@ fn run(settings: &Settings, home: &Path, args: &Args) -> i32 {
         "held": plan.held.iter().map(|(t, h)| json!({ "path": t.path, "why": h.describe() })).collect::<Vec<_>>(),
         "scratch_dirs_removed": swept,
         "artifacts_trimmed": trimmed,
+        "node_modules_removed": node_removed,
+        "node_modules_held": node_held,
+        "proposed": proposals.len(),
+        "proposed_allocated": proposed,
+        "proposal_sizing_incomplete": sizing_cut,
         "unreadable_dirs": s.unreadable,
         "scan_incomplete": s.incomplete,
         "seconds": started.elapsed().as_secs(),
@@ -466,7 +585,8 @@ fn run(settings: &Settings, home: &Path, args: &Args) -> i32 {
         println!("{value}");
     } else if !args.quiet || still_low {
         println!(
-            "target-gc: {} → {} free; {evicted} evicted, {trimmed} artifacts trimmed, {} held{}",
+            "target-gc: {} → {} free; {evicted} evicted, {trimmed} artifacts trimmed, \
+             {node_removed} node_modules removed, {} held{}",
             human_bytes(s.space.available),
             human_bytes(available),
             plan.held.len(),
@@ -477,7 +597,235 @@ fn run(settings: &Settings, home: &Path, args: &Args) -> i32 {
             }
         );
     }
+    if !args.json && !proposals.is_empty() && (!args.quiet || still_low) {
+        println!(
+            "target-gc: {} unused build directories ({}) wait for approval: `target-gc review`, \
+             or `target-gc propose` to list them",
+            proposals.len(),
+            human_bytes(proposed)
+        );
+    }
     record.exit_code
+}
+
+/// Build directories the run left in place, held by nothing and with no
+/// process in their project, sized until `deadline`. The bool is true when
+/// sizing stopped at the deadline.
+fn proposals_from(
+    plan: &plan::Plan,
+    evidence: &[Evidence],
+    bloat_min: u64,
+    deadline: Instant,
+    now: SystemTime,
+) -> (Vec<Proposal>, bool) {
+    let mut sized = Vec::new();
+    let mut cut = false;
+    for t in plan.young.iter().chain(&plan.queue).chain(&plan.expired) {
+        if !t.path.is_dir() || liveness::occupied(t, evidence) {
+            continue;
+        }
+        if Instant::now() >= deadline {
+            cut = true;
+            break;
+        }
+        sized.push((t.clone(), discover::allocated_bytes(&t.path)));
+    }
+    (propose::select(sized, bloat_min, now), cut)
+}
+
+fn save_proposals(state_dir: &Path, items: &[Proposal]) {
+    let value = propose::to_json(state::now_secs(), items);
+    if let Err(e) = state::write_file(state_dir, propose::FILE, &value) {
+        eprintln!("target-gc: could not write the proposals: {e}");
+    }
+}
+
+fn load_proposals(state_dir: &Path) -> Vec<Proposal> {
+    state::read_file(state_dir, propose::FILE)
+        .as_ref()
+        .and_then(propose::from_json)
+        .map(|(_, items)| items)
+        .unwrap_or_default()
+}
+
+fn propose_cmd(settings: &Settings, home: &Path, args: &Args) -> i32 {
+    let Some(bloat_min) = settings.bloat_min else {
+        println!("target-gc: proposals are off (bloat_min_size = \"0\")");
+        return 0;
+    };
+    let started = Instant::now();
+    let s = match survey(settings, home, walk_deadline(started, settings)) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("target-gc: {e}");
+            return 2;
+        }
+    };
+    let policy = match policy(settings, s.space) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("target-gc: {e}");
+            return 2;
+        }
+    };
+    let now = SystemTime::now();
+    let plan = plan::plan(s.candidates, &policy, s.space.available, now);
+    let (items, cut) = proposals_from(
+        &plan,
+        &s.evidence,
+        bloat_min,
+        started + settings.deadline,
+        now,
+    );
+    save_proposals(&config::state_dir(home), &items);
+    if args.json {
+        println!("{}", propose::to_json(state::now_secs(), &items));
+        return 0;
+    }
+    println!(
+        "{} free. Unused build directories of {} or more (no lock held, no process in the \
+         project):",
+        human_bytes(s.space.available),
+        human_bytes(bloat_min)
+    );
+    if items.is_empty() {
+        println!("  (none)");
+    }
+    for p in &items {
+        println!("  {}", propose::describe(p));
+    }
+    if cut {
+        println!("Sizing hit the deadline; directories after the cut were not measured.");
+    }
+    if !items.is_empty() {
+        println!(
+            "Approve with `target-gc evict <path>…` or `target-gc review`. Sizes are allocated \
+             bytes; copy-on-write clones free less."
+        );
+    }
+    0
+}
+
+/// Evict build directories a person approved. Every condition except age is
+/// checked again here, from fresh evidence.
+fn evict_paths(settings: &Settings, home: &Path, paths: &[PathBuf]) -> i32 {
+    if paths.is_empty() {
+        eprintln!("target-gc: name the build directories to evict: target-gc evict <path>…");
+        return 2;
+    }
+    let state_dir = config::state_dir(home);
+    let sources = protect::load_sources(&protect::service_dirs(home), &settings.scan_files);
+    let mut evidence = Vec::new();
+    let mut evidence_at: Option<Instant> = None;
+    let mut gone = Vec::new();
+    let mut code = 0;
+    for raw in paths {
+        if evidence_at.is_none_or(|at| at.elapsed() > EVIDENCE_TTL) {
+            let Some(fresh) = liveness::snapshot() else {
+                eprintln!(
+                    "target-gc: could not list running processes, so nothing can be proven unused"
+                );
+                return 2;
+            };
+            evidence = fresh;
+            evidence_at = Some(Instant::now());
+        }
+        let path = fs::canonicalize(raw).unwrap_or_else(|_| raw.clone());
+        let before = disk::space(home).map_or(0, |sp| sp.available);
+        let result = propose::check(
+            &path,
+            home,
+            &settings.protect,
+            &sources,
+            &evidence,
+            &settings.writers,
+        )
+        .and_then(|t| {
+            evict::evict(&t, &evidence, &settings.writers).map_err(|r| r.reason().to_string())
+        });
+        let after = disk::space(home).map_or(before, |sp| sp.available);
+        match result {
+            Ok(()) => {
+                let freed = after.saturating_sub(before);
+                println!(
+                    "evicted  {} — free space moved {}",
+                    path.display(),
+                    human_bytes(freed)
+                );
+                append_approved(
+                    &state_dir,
+                    &json!({
+                        "evicted": path,
+                        "freed": freed,
+                        "at": state::now_secs(),
+                    }),
+                );
+                gone.push(path);
+            }
+            Err(why) => {
+                println!("refused  {} — {why}", path.display());
+                code = 1;
+            }
+        }
+    }
+    if !gone.is_empty() {
+        let left: Vec<Proposal> = load_proposals(&state_dir)
+            .into_iter()
+            .filter(|p| !gone.contains(&p.path))
+            .collect();
+        save_proposals(&state_dir, &left);
+    }
+    code
+}
+
+fn append_approved(state_dir: &Path, entry: &Value) {
+    let line = format!("{entry}\n");
+    let written = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(state_dir.join(APPROVED_LOG))
+        .and_then(|mut f| f.write_all(line.as_bytes()));
+    if let Err(e) = written {
+        eprintln!("target-gc: could not log the eviction: {e}");
+    }
+}
+
+/// Ask, one directory at a time, about the proposals the last run or
+/// `propose` saved.
+fn review(settings: &Settings, home: &Path) -> i32 {
+    if !std::io::stdin().is_terminal() {
+        eprintln!(
+            "target-gc: review asks on a terminal. From an agent: list with `target-gc propose`, \
+             ask the user, then run `target-gc evict <path>…` on what they approve."
+        );
+        return 2;
+    }
+    let items: Vec<Proposal> = load_proposals(&config::state_dir(home))
+        .into_iter()
+        .filter(|p| p.path.is_dir())
+        .collect();
+    if items.is_empty() {
+        println!("Nothing waits for approval. `target-gc propose` looks again.");
+        return 0;
+    }
+    let mut approved = Vec::new();
+    let mut lines = std::io::stdin().lock().lines();
+    for p in &items {
+        print!("{}\n  evict? [y/N/q] ", propose::describe(p));
+        let _ = std::io::stdout().flush();
+        let Some(Ok(answer)) = lines.next() else {
+            break;
+        };
+        match answer.trim().to_ascii_lowercase().as_str() {
+            "y" | "yes" => approved.push(p.path.clone()),
+            "q" | "quit" => break,
+            _ => {}
+        }
+    }
+    if approved.is_empty() {
+        return 0;
+    }
+    evict_paths(settings, home, &approved)
 }
 
 /// Orphaned rustc scratch older than a day, in recently built directories

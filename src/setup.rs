@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use target_gc::config::{self, Settings};
-use target_gc::{discover, disk, install, skill, state};
+use target_gc::{discover, disk, install, propose, skill, state};
 
 const CONFIG_TEMPLATE: &str = r#"# target-gc settings. Numbers are quoted strings.
 [target-gc]
@@ -16,6 +16,8 @@ target_free   = "20%"
 min_idle_days = "2"
 pressure_min_idle_hours = "1"
 max_idle_days = "30"
+bloat_min_size = "5G"
+node_modules_idle_days = "60"
 protect       = []
 "#;
 
@@ -29,13 +31,25 @@ pub fn hook(config_path: &Path, home: &Path) {
     };
     let space = disk::space(home);
     let keep_free = space.map_or(0, |sp| settings.keep_free.resolve(sp.total));
-    let record = state::read(&config::state_dir(home));
+    let state_dir = config::state_dir(home);
+    let record = state::read(&state_dir);
     if let Some(line) = state::hook_line(
         record.as_ref(),
         space.map(|sp| sp.available),
         keep_free,
         state::now_secs(),
     ) {
+        println!("{line}");
+    }
+    let waiting: Vec<_> = state::read_file(&state_dir, propose::FILE)
+        .as_ref()
+        .and_then(propose::from_json)
+        .map(|(_, items)| items)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| p.path.is_dir())
+        .collect();
+    if let Some(line) = propose::hook_line(&waiting) {
         println!("{line}");
     }
 }
@@ -163,7 +177,13 @@ USAGE:
     target-gc scan [--sizes] [--json]      list every Cargo build directory and why it is held
     target-gc run [--dry-run] [--quiet] [--json]
                                            evict what the policy allows, measure what came back
+    target-gc propose [--json]             list unused build directories of bloat_min_size or
+                                           more, whatever their age, for a person to approve
+    target-gc evict <path>…                evict approved directories; re-checks locks, writers,
+                                           running binaries, services and occupancy first
+    target-gc review                       ask y/n for each saved proposal, then evict the yeses
     target-gc hook                         one line for a session, only when something is wrong
+                                           or proposals wait for approval
     target-gc install [--dry-run]          schedule `run` hourly (launchd / systemd user timer)
     target-gc uninstall                    remove the schedule
     target-gc skill [install] [--dir <d>]  print the Claude Code skill, or write it to

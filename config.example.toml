@@ -12,7 +12,7 @@
 # roots = ["~"]
 
 # Never descended into.
-skip = ["~/Library", "~/Pictures", "~/Music", "~/Movies"]
+skip = ["~/Library", "~/Pictures", "~/Music", "~/Movies", "~/OrbStack"]
 
 # Below keep_free, evict the least recently built directories until free
 # space reaches target_free.
@@ -38,6 +38,20 @@ max_idle_days = "30"
 # costs at most a rebuild of that crate. "0" turns the trim off.
 trim_after_days = "3"
 
+# A build directory no process has its working directory in, and at least
+# this big, is proposed for eviction whatever its age: the session hook names
+# it and `target-gc review` or `target-gc evict <path>` removes it once a
+# person approves. "0" turns proposals off.
+bloat_min_size = "5G"
+
+# A project's node_modules is removed once nothing in its git checkout has
+# changed for this many days, no process sits in the checkout or runs from the
+# node_modules, and no service or scan_files entry names the project. One
+# install brings it back. Ones under a dot-directory (editor extensions,
+# version managers) are never touched. "0" turns this off; otherwise at least
+# min_idle_days.
+node_modules_idle_days = "60"
+
 # Paths never touched.
 protect = []
 
@@ -48,8 +62,9 @@ protect = []
 # other process there keeps it only within min_idle_days.
 writers = []
 
-# Files that may name a binary inside a build directory, in addition to every
-# launchd plist and systemd unit. A directory named in any of them is kept.
+# Files that may name a binary inside a build directory, or a project whose
+# node_modules a server runs from, in addition to every launchd plist and
+# systemd unit. A directory named in any of them is kept.
 scan_files = [
   "~/.claude.json",
   "~/.claude/settings.json",
@@ -57,4 +72,6 @@ scan_files = [
   "~/.zshrc",
   "~/.bashrc",
   "~/.profile",
+  "~/Library/Application Support/Claude/claude_desktop_config.json",
+  "~/.cursor/mcp.json",
 ]

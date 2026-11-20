@@ -118,11 +118,31 @@ pub fn owner<'a>(
 }
 
 /// Whether any process has its cwd in the project. Not a hold: it only keeps
-/// the directory on `min_idle` while the disk is under pressure.
+/// the directory on `min_idle` while the disk is under pressure, and out of
+/// the proposals a person is asked to approve.
 pub fn occupied(target: &Target, evidence: &[Evidence]) -> bool {
+    occupant(target, evidence).is_some()
+}
+
+/// The first process with its cwd in the project's session scope, whatever
+/// it is.
+pub fn occupant<'a>(target: &Target, evidence: &'a [Evidence]) -> Option<&'a Evidence> {
+    let scope = session_scope(&target.project);
     evidence
         .iter()
-        .any(|e| e.kind == Kind::Cwd && is_under(&e.path, &target.project))
+        .find(|e| e.kind == Kind::Cwd && is_under(&e.path, &scope))
+}
+
+/// Where a session using this project would sit: the enclosing git checkout
+/// (a worktree's `.git` is a file), or the project itself outside one. A
+/// gate runner at a worktree root builds `control-plane/target` without ever
+/// entering `control-plane/`.
+pub fn session_scope(project: &Path) -> PathBuf {
+    project
+        .ancestors()
+        .find(|d| d.join(".git").exists())
+        .unwrap_or(project)
+        .to_path_buf()
 }
 
 /// Everything that holds this build directory right now, locks first.
